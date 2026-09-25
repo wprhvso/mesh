@@ -9,6 +9,7 @@ from app.db.session import SessionLocal
 from app.db.models import Client, Runner, GitHubAccount, SSHKey, DNSRecord
 
 reconcile_event = asyncio.Event()
+last_healthy_set = set()
 
 def trigger_reconcile():
     reconcile_event.set()
@@ -31,7 +32,7 @@ def run_reconciliation():
         reconcile_clients(db)
         reconcile_dns(db)
         reconcile_ssh(db)
-        reconcile_routing_and_weights(db)
+        reconcile_routing(db)
         reconcile_fleet(db)
     finally:
         db.close()
@@ -102,73 +103,44 @@ def reconcile_ssh(db):
             f.write(new_auth)
         os.chmod(auth_path, 0o600)
 
-def parse_ping(ip):
-    res = subprocess.run(["ping", "-c", "2", "-W", "1", ip], capture_output=True, text=True)
-    if res.returncode != 0:
-        return None
-    for line in res.stdout.splitlines():
-        if "rtt min/avg/max/mdev" in line or "round-trip min/avg/max/stddev" in line:
-            parts = line.split("=")[1].strip().split("/")
-            return float(parts[1])
-    return 10.0
-
-def reconcile_routing_and_weights(db):
+def reconcile_routing(db):
+    global last_healthy_set
     runners = db.query(Runner).all()
     now = datetime.datetime.utcnow()
 
-    candidate_tuns = []
-    costs = {}
+    healthy_runners = []
+    current_healthy_ids = set()
 
     for r in runners:
-        age_seconds = (now - r.registered_at).total_seconds() if r.registered_at else 0
-        is_draining = (age_seconds >= 18000) or (r.status == "draining")
-
-        ping_val = parse_ping(r.tun_client_ip)
-        if ping_val is not None:
-            r.healthy = True
+        res = subprocess.run(["ping", "-c", "1", "-W", "1", r.tun_client_ip], stdout=subprocess.DEVNULL)
+        is_healthy = (res.returncode == 0)
+        r.healthy = is_healthy
+        r.weight = 1
+        if is_healthy:
             r.last_seen = now
-            if r.rtt_mesh > 0:
-                r.rtt_mesh = round(0.7 * r.rtt_mesh + 0.3 * ping_val, 2)
-            else:
-                r.rtt_mesh = round(ping_val, 2)
-            r.rtt_total = round(r.rtt_mesh + (r.rtt_egress or 5.0), 2)
-
-            cost = r.rtt_total
-            if is_draining:
-                cost *= 20.0
-                r.status = "draining"
-            else:
-                r.status = "active"
-
-            costs[r.id] = cost
-            candidate_tuns.append(r)
+            r.status = "active"
+            healthy_runners.append(r)
+            current_healthy_ids.add(r.id)
         else:
-            r.healthy = False
             r.status = "offline"
 
-    if candidate_tuns and costs:
-        min_cost = min(costs.values())
-        nexthops = []
-        for r in candidate_tuns:
-            cost = costs[r.id]
-            if r.status == "draining":
-                w = 1
-            else:
-                w = max(1, min(100, int(round(100.0 * (min_cost / max(cost, 1.0))))))
-            r.weight = w
-            nexthops.extend(["nexthop", "via", r.tun_client_ip, "dev", r.tun_name, "weight", str(w)])
-
-        cmd = ["ip", "route", "replace", "default", "scope", "global", "table", "200"] + nexthops
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    else:
-        default_gw = os.environ.get("DEFAULT_GW", "91.230.210.1")
-        default_iface = os.environ.get("DEFAULT_IFACE", "ens3")
-        subprocess.run([
-            "ip", "route", "replace", "default", "via", default_gw,
-            "dev", default_iface, "table", "200"
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
     db.commit()
+
+    if current_healthy_ids != last_healthy_set:
+        if healthy_runners:
+            nexthops = []
+            for r in healthy_runners:
+                nexthops.extend(["nexthop", "via", r.tun_client_ip, "dev", r.tun_name, "weight", "1"])
+            cmd = ["ip", "route", "replace", "default", "table", "200"] + nexthops
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            default_gw = os.environ.get("DEFAULT_GW", "91.230.210.1")
+            default_iface = os.environ.get("DEFAULT_IFACE", "ens3")
+            subprocess.run([
+                "ip", "route", "replace", "default", "via", default_gw,
+                "dev", default_iface, "table", "200"
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        last_healthy_set = current_healthy_ids
 
 def reconcile_fleet(db):
     accounts = db.query(GitHubAccount).filter(GitHubAccount.is_active == True).all()

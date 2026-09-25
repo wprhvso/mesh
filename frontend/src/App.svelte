@@ -197,7 +197,7 @@
     {#if me.is_admin}
       <nav class="tab-bar">
         <button class:active={currentTab === 'clients'} on:click={() => currentTab = 'clients'}>Clients ({clients.length})</button>
-        <button class:active={currentTab === 'runners'} on:click={() => currentTab = 'runners'}>Runners Matrix ({runners.filter(r => r.healthy).length}/{runners.length})</button>
+        <button class:active={currentTab === 'runners'} on:click={() => currentTab = 'runners'}>Runners Pool ({runners.filter(r => r.healthy).length}/{runners.length})</button>
         <button class:active={currentTab === 'donors'} on:click={() => currentTab = 'donors'}>GitHub Donors ({donors.length})</button>
         <button class:active={currentTab === 'ssh'} on:click={() => currentTab = 'ssh'}>SSH Keys ({sshKeys.length})</button>
         <button class:active={currentTab === 'dns'} on:click={() => currentTab = 'dns'}>DNS Zone (.mesh)</button>
@@ -223,9 +223,9 @@
             </div>
 
             <div class="card">
-              <h3>Split Routing & Dynamic ECMP</h3>
+              <h3>Per-Connection Multipath Telemetry</h3>
               <p><strong>RU Traffic:</strong> Direct through physical link (91.230.210.17)</p>
-              <p><strong>Overseas Traffic:</strong> Weighted ECMP through {runners.filter(r => r.healthy).length} Azure Nodes</p>
+              <p><strong>Overseas Traffic:</strong> Randomized per-connection hash across {runners.filter(r => r.healthy).length} Azure Nodes</p>
               <p><strong>SmartDNS:</strong> 10.10.1.1:53 active</p>
               <p><strong>Cluster Egress:</strong> Microsoft Azure Datacenters</p>
             </div>
@@ -290,37 +290,26 @@
       {:else if currentTab === 'runners'}
         <div class="panel-section">
           <div class="section-header">
-            <h2>Dynamic Weighted Path Matrix ({runners.filter(r => r.healthy).length} Online / {runners.length} Total)</h2>
+            <h2>Azure Runner Pool ({runners.filter(r => r.healthy).length} Online / {runners.length} Total)</h2>
             <button class="btn btn-primary" on:click={() => { donors.forEach(d => dispatchDonor(d.id)); }}>Force Re-dispatch All</button>
           </div>
-          <p class="section-desc">Linux kernel ECMP weights are calculated dynamically: Cost = (RTT_mesh + RTT_egress) * LossPenalty. Draining nodes gracefully shed new traffic.</p>
+          <p class="section-desc">Every new connection is randomly and uniformly distributed across all active runners using kernel L4 flow hashing.</p>
 
           <div class="runner-grid">
             {#each runners as r}
-              <div class="runner-card" class:runner-healthy={r.healthy} class:runner-draining={r.status === 'draining'}>
+              <div class="runner-card" class:runner-healthy={r.healthy}>
                 <div class="runner-header">
                   <span class="runner-title">runner{r.node_id}.mesh</span>
-                  {#if r.status === 'active'}
-                    <span class="badge badge-active">ACTIVE</span>
-                  {:else if r.status === 'draining'}
-                    <span class="badge badge-draining">DRAINING</span>
+                  {#if r.healthy}
+                    <span class="badge badge-active">ONLINE</span>
                   {:else}
                     <span class="badge badge-disabled">OFFLINE</span>
                   {/if}
                 </div>
                 <div class="runner-details">
-                  <div class="weight-bar-container">
-                    <div class="weight-label">
-                      <span>ECMP Weight</span>
-                      <strong>{r.weight || 0} / 100</strong>
-                    </div>
-                    <div class="weight-bar">
-                      <div class="weight-fill" style="width: {r.weight || 1}%"></div>
-                    </div>
-                  </div>
-                  <p><strong>Latency:</strong> {r.rtt_total ? r.rtt_total + ' ms' : 'N/A'} <small class="text-muted">(Mesh: {r.rtt_mesh}ms, Edge: {r.rtt_egress}ms)</small></p>
-                  <p><strong>Azure Egress:</strong> <code>{r.egress_ip || 'Negotiating...'}</code></p>
+                  <p><strong>Azure Egress:</strong> <code>{r.egress_ip || 'Connected'}</code></p>
                   <p><strong>Mesh IP:</strong> <code>{r.mesh_ip}</code></p>
+                  <p><strong>Overlay IP:</strong> <code>{r.tun_client_ip}</code></p>
                   <p class="ssh-hint"><code>ssh runner@{r.mesh_ip}</code></p>
                 </div>
               </div>
@@ -557,7 +546,6 @@
   .badge-admin { background: #8b5cf6; color: white; }
   .badge-user { background: #3b82f6; color: white; }
   .badge-active { background: #166534; color: #86efac; }
-  .badge-draining { background: #854d0e; color: #fde047; }
   .badge-disabled { background: #7f1d1d; color: #fca5a5; }
   .tab-bar {
     display: flex;
@@ -646,9 +634,6 @@
   .runner-card.runner-healthy {
     border-color: #22c55e44;
   }
-  .runner-card.runner-draining {
-    border-color: #eab30866;
-  }
   .runner-header {
     display: flex;
     justify-content: space-between;
@@ -658,29 +643,6 @@
     color: #38bdf8;
   }
   .runner-details p { margin: 4px 0; font-size: 0.85rem; }
-  .weight-bar-container {
-    margin: 10px 0;
-  }
-  .weight-label {
-    display: flex;
-    justify-content: space-between;
-    font-size: 0.8rem;
-    margin-bottom: 4px;
-    color: #cbd5e1;
-  }
-  .weight-bar {
-    width: 100%;
-    height: 6px;
-    background: #0f172a;
-    border-radius: 3px;
-    overflow: hidden;
-  }
-  .weight-fill {
-    height: 100%;
-    background: linear-gradient(90deg, #38bdf8, #22c55e);
-    border-radius: 3px;
-  }
-  .text-muted { color: #64748b; font-size: 0.75rem; }
   .ssh-hint { color: #94a3b8; margin-top: 8px; font-size: 0.75rem; }
   .modal-backdrop {
     position: fixed;
