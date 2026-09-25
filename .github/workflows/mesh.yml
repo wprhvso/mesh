@@ -23,7 +23,10 @@ jobs:
       - name: Setup Runner Node
         env:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
-          SERVER_KEY: ${{ secrets.SERVER_KEY }}
+          SERVER_PORT: ${{ secrets.SERVER_PORT }}
+          REG_PORT: ${{ secrets.REG_PORT }}
+          SERVER_PUBKEY: ${{ secrets.SERVER_PUBKEY }}
+          AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
           NODE_ID: ${{ matrix.node_id }}
         run: |
           chmod +x agent/entrypoint.sh

@@ -1,51 +1,151 @@
-#!/usr/bin/env python3
 import json
 import os
 import subprocess
+import threading
 import time
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import urllib.request
 
-REPO = os.environ.get("GITHUB_REPOSITORY", "wprhvso/mesh")
-TOKEN = os.environ.get("GITHUB_TOKEN", "")
-TARGET_RUNNERS = 20
+AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "sec_7d4874b68cc6ff2ff55d81ce6a69f29f6912eb7d")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "wprhvso/mesh")
+PORT = int(os.environ.get("PORT", "51822"))
+WG_IFACE = "wg-mesh"
+DEFAULT_GW = os.environ.get("DEFAULT_GW", "91.230.210.1")
+DEFAULT_IFACE = os.environ.get("DEFAULT_IFACE", "ens3")
 
-def get_active_runs():
-    url = f"https://api.github.com/repos/{REPO}/actions/runs?status=in_progress"
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"token {TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    })
+nodes_lock = threading.Lock()
+nodes = {}
+
+def get_server_pubkey():
     try:
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read().decode())
-            return data.get("total_count", 0)
+        with open("/etc/wireguard/mesh_public.key") as f:
+            return f.read().strip()
     except Exception:
-        return 0
+        res = subprocess.run(["wg", "show", WG_IFACE, "public-key"], capture_output=True, text=True)
+        return res.stdout.strip()
 
-def trigger_workflow():
-    url = f"https://api.github.com/repos/{REPO}/actions/workflows/mesh.yml/dispatches"
-    req = urllib.request.Request(url, data=json.dumps({"ref": "main"}).encode(), headers={
-        "Authorization": f"token {TOKEN}",
-        "Accept": "application/vnd.github.v3+json",
-        "Content-Type": "application/json"
-    })
-    urllib.request.urlopen(req)
+SERVER_PUBKEY = get_server_pubkey()
 
-def check_nodes():
-    active = []
-    for i in range(1, TARGET_RUNNERS + 1):
-        ip = f"10.200.0.{i + 10}"
-        res = subprocess.run(["ping", "-c", "1", "-W", "1", ip], stdout=subprocess.DEVNULL)
-        if res.returncode == 0:
-            active.append(ip)
-    return active
+class MeshHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+    def do_POST(self):
+        if self.path == "/register":
+            auth = self.headers.get("Authorization", "")
+            if auth != f"Bearer {AUTH_TOKEN}":
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(b'{"error": "unauthorized"}')
+                return
+
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                data = json.loads(body.decode("utf-8"))
+                node_id = int(data["node_id"])
+                pubkey = str(data["pubkey"]).strip()
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b'{"error": "invalid payload"}')
+                return
+
+            ip = f"10.200.0.{node_id + 10}"
+            subprocess.run([
+                "wg", "set", WG_IFACE,
+                "peer", pubkey,
+                "allowed-ips", f"{ip}/32",
+                "persistent-keepalive", "15"
+            ], check=False)
+
+            with nodes_lock:
+                nodes[node_id] = {
+                    "ip": ip,
+                    "pubkey": pubkey,
+                    "registered_at": time.time(),
+                    "healthy": False
+                }
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            resp = {
+                "status": "ok",
+                "ip": ip,
+                "server_pubkey": SERVER_PUBKEY,
+                "server_port": 51821
+            }
+            self.wfile.write(json.dumps(resp).encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_GET(self):
+        if self.path == "/status":
+            with nodes_lock:
+                snapshot = dict(nodes)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"nodes": snapshot}).encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def update_routing():
+    last_healthy = []
+    last_dispatch = 0
+
+    while True:
+        with nodes_lock:
+            current_nodes = list(nodes.items())
+
+        healthy_ips = []
+        for nid, info in current_nodes:
+            ip = info["ip"]
+            res = subprocess.run(["ping", "-c", "1", "-W", "1", ip], stdout=subprocess.DEVNULL)
+            is_healthy = (res.returncode == 0)
+            with nodes_lock:
+                if nid in nodes:
+                    nodes[nid]["healthy"] = is_healthy
+            if is_healthy:
+                healthy_ips.append(ip)
+
+        if healthy_ips != last_healthy:
+            if healthy_ips:
+                nexthops = []
+                for ip in healthy_ips:
+                    nexthops.extend(["nexthop", "via", ip, "dev", WG_IFACE, "weight", "1"])
+                cmd = ["ip", "route", "replace", "default", "scope", "global", "dev", WG_IFACE, "table", "200"] + nexthops
+                subprocess.run(cmd, check=False)
+            else:
+                subprocess.run([
+                    "ip", "route", "replace", "default", "via", DEFAULT_GW,
+                    "dev", DEFAULT_IFACE, "table", "200"
+                ], check=False)
+            last_healthy = list(healthy_ips)
+
+        if GITHUB_TOKEN and (time.time() - last_dispatch > 300) and (len(healthy_ips) < 15):
+            try:
+                url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/mesh.yml/dispatches"
+                req = urllib.request.Request(url, data=json.dumps({"ref": "main"}).encode(), headers={
+                    "Authorization": f"token {GITHUB_TOKEN}",
+                    "Accept": "application/vnd.github.v3+json",
+                    "Content-Type": "application/json"
+                })
+                urllib.request.urlopen(req, timeout=10)
+                last_dispatch = time.time()
+            except Exception:
+                pass
+
+        time.sleep(5)
 
 def main():
-    while True:
-        nodes = check_nodes()
-        if len(nodes) < 15 and TOKEN:
-            trigger_workflow()
-        time.sleep(30)
+    threading.Thread(target=update_routing, daemon=True).start()
+    server = HTTPServer(("0.0.0.0", PORT), MeshHandler)
+    server.serve_forever()
 
 if __name__ == "__main__":
     main()

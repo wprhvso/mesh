@@ -1,21 +1,54 @@
 #!/usr/bin/env bash
 set -e
 
-sudo apt-get update -qq && sudo apt-get install -y -qq wireguard iptables curl
-
-IP_OCTET=$((NODE_ID + 10))
-TUN_IP="10.200.0.${IP_OCTET}"
+sudo apt-get update -qq && sudo apt-get install -y -qq wireguard-tools iptables curl jq
 
 PRIVATE_KEY=$(wg genkey)
 PUBLIC_KEY=$(echo "${PRIVATE_KEY}" | wg pubkey)
 
-echo "Node ${NODE_ID} online with IP ${TUN_IP}"
+REGISTER_PAYLOAD=$(printf '{"node_id": %d, "pubkey": "%s"}' "${NODE_ID}" "${PUBLIC_KEY}")
 
-sudo sysctl -w net.ipv4.ip_forward=1
+RESP=$(curl -s -S -f --connect-timeout 10 --max-time 15     -X POST "http://${SERVER_HOST}:${REG_PORT}/register"     -H "Authorization: Bearer ${AUTH_TOKEN}"     -H "Content-Type: application/json"     -d "${REGISTER_PAYLOAD}")
+
+ASSIGNED_IP=$(echo "${RESP}" | jq -r .ip)
+SERVER_PUBKEY=$(echo "${RESP}" | jq -r .server_pubkey)
+SERVER_PORT=$(echo "${RESP}" | jq -r .server_port)
+
+if [ -z "${ASSIGNED_IP}" ] || [ "${ASSIGNED_IP}" = "null" ]; then
+    echo "Failed to obtain IP from controller: ${RESP}" >&2
+    exit 1
+fi
+
+sudo mkdir -p /etc/wireguard
+cat << EOF | sudo tee /etc/wireguard/wg0.conf > /dev/null
+[Interface]
+Address = ${ASSIGNED_IP}/24
+PrivateKey = ${PRIVATE_KEY}
+
+[Peer]
+PublicKey = ${SERVER_PUBKEY}
+Endpoint = ${SERVER_HOST}:${SERVER_PORT}
+AllowedIPs = 10.200.0.0/24
+PersistentKeepalive = 15
+EOF
+
+sudo chmod 600 /etc/wireguard/wg0.conf
+sudo wg-quick up wg0
+
+sudo sysctl -w net.ipv4.ip_forward=1 > /dev/null
 DEFAULT_IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
 sudo iptables -t nat -A POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE
+sudo iptables -A FORWARD -i wg0 -o "${DEFAULT_IFACE}" -j ACCEPT
+sudo iptables -A FORWARD -i "${DEFAULT_IFACE}" -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+echo "Node ${NODE_ID} active on ${ASSIGNED_IP}, tunnel established"
 
 SLEEP_DURATION=$((18000 + (NODE_ID * 60)))
-echo "Heartbeat loop initialized for ${SLEEP_DURATION}s"
+END_TIME=$((SECONDS + SLEEP_DURATION))
 
-sleep "${SLEEP_DURATION}"
+while [ "${SECONDS}" -lt "${END_TIME}" ]; do
+    ping -c 1 -W 2 10.200.0.1 > /dev/null 2>&1 || true
+    sleep 10
+done
+
+sudo wg-quick down wg0 || true
