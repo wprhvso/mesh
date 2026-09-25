@@ -84,8 +84,9 @@ apt-get update || {
     log_warn "apt-get update reported warnings with some mirrors, continuing setup"
 }
 
-apt-get install -y -qq curl wget gnupg nftables iptables qrencode dkms
+apt-get install -y -qq curl wget gnupg nftables iptables qrencode dkms wireguard-tools python3
 apt-get install -y -qq linux-headers-$(uname -r) || true
+modprobe ipip || true
 log_success "Base dependencies installed"
 
 log_step "Configuring Amnezia repository and GPG signing key"
@@ -237,6 +238,28 @@ log_step "Starting and enabling awg-quick@awg0 service"
 systemctl enable --now awg-quick@awg0
 log_success "AmneziaWG awg0 service is active"
 
+log_step "Configuring WireGuard mesh interface (wg-mesh)"
+mkdir -p /etc/wireguard
+if [ ! -f /etc/wireguard/mesh_private.key ]; then
+    wg genkey > /etc/wireguard/mesh_private.key
+    chmod 600 /etc/wireguard/mesh_private.key
+fi
+MESH_PRIV=$(cat /etc/wireguard/mesh_private.key)
+MESH_PUB=$(echo "${MESH_PRIV}" | wg pubkey)
+echo "${MESH_PUB}" > /etc/wireguard/mesh_public.key
+
+cat << EOF > /etc/wireguard/wg-mesh.conf
+[Interface]
+Address = 10.200.0.1/24
+ListenPort = 51821
+PrivateKey = ${MESH_PRIV}
+EOF
+chmod 600 /etc/wireguard/wg-mesh.conf
+
+systemctl enable --now wg-quick@wg-mesh
+systemctl restart wg-quick@wg-mesh
+log_success "WireGuard mesh interface wg-mesh is active on port 51821"
+
 log_step "Writing nftables configuration (/etc/nftables.conf)"
 cat << EOF > /etc/nftables.conf
 flush ruleset
@@ -251,7 +274,8 @@ table inet filter {
     chain prerouting {
         type filter hook prerouting priority mangle; policy accept;
         iifname "awg0" tcp dport 853 reject with tcp reset
-        iifname "awg0" ip daddr @ru_domains meta mark set 0x100
+        iifname "awg0" ip daddr @ru_domains meta mark set 0x100 return
+        iifname "awg0" meta mark set 0x200
     }
 
     chain forward {
@@ -262,7 +286,9 @@ table inet filter {
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
         meta mark 0x100 oifname "${DEFAULT_IFACE}" masquerade
-        oifname "wg-mesh" masquerade
+        meta mark 0x200 oifname "tun*" masquerade
+        meta mark 0x200 oifname "${DEFAULT_IFACE}" masquerade
+        oifname "${DEFAULT_IFACE}" masquerade
     }
 }
 EOF
@@ -333,8 +359,8 @@ After=network.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'ip rule add fwmark 0x100 lookup 100 2>/dev/null || true; ip route replace default via ${DEFAULT_GW} dev ${DEFAULT_IFACE} table 100'
-ExecStop=/bin/sh -c 'ip rule del fwmark 0x100 lookup 100 2>/dev/null || true'
+ExecStart=/bin/sh -c 'ip rule add fwmark 0x100 lookup 100 2>/dev/null || true; ip route replace default via ${DEFAULT_GW} dev ${DEFAULT_IFACE} table 100; ip rule add fwmark 0x200 lookup 200 2>/dev/null || true; ip route replace default via ${DEFAULT_GW} dev ${DEFAULT_IFACE} table 200'
+ExecStop=/bin/sh -c 'ip rule del fwmark 0x100 lookup 100 2>/dev/null || true; ip rule del fwmark 0x200 lookup 200 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
@@ -344,6 +370,36 @@ systemctl daemon-reload
 systemctl enable --now pbr-mesh
 systemctl restart pbr-mesh
 log_success "Policy-Based Routing service configured and active"
+
+log_step "Deploying Mesh Cluster Controller daemon"
+mkdir -p /opt/mesh
+curl -fsSL https://raw.githubusercontent.com/wprhvso/mesh/main/server/controller.py -o /opt/mesh/controller.py
+chmod 755 /opt/mesh/controller.py
+
+cat << EOF > /etc/systemd/system/mesh-controller.service
+[Unit]
+Description=Mesh Cluster Controller and Dynamic Routing Daemon
+After=network.target wg-quick@wg-mesh.service
+
+[Service]
+Type=simple
+Environment=AUTH_TOKEN=sec_7d4874b68cc6ff2ff55d81ce6a69f29f6912eb7d
+Environment=GITHUB_REPO=wprhvso/mesh
+Environment=PORT=51822
+Environment=DEFAULT_GW=${DEFAULT_GW}
+Environment=DEFAULT_IFACE=${DEFAULT_IFACE}
+ExecStart=/usr/bin/python3 /opt/mesh/controller.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now mesh-controller
+systemctl restart mesh-controller
+log_success "Mesh Cluster Controller active and listening on port 51822"
 
 log_success "Installation completed successfully"
 printf "\n"
