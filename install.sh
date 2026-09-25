@@ -40,6 +40,16 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 log_success "Root privileges verified"
 
+log_step "Purging any previous or broken repository files"
+rm -f /etc/apt/sources.list.d/*amnezia* /etc/apt/keyrings/amnezia*
+sed -i '/amnezia/d' /etc/apt/sources.list 2>/dev/null || true
+for f in /etc/apt/sources.list.d/*.list; do
+    if [ -f "$f" ]; then
+        sed -i '/amnezia/d' "$f" 2>/dev/null || true
+    fi
+done
+log_success "Cleaned up old repository configurations"
+
 log_step "Detecting network topology and public interface"
 DEFAULT_IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
 DEFAULT_GW=$(ip route | grep default | awk '{print $3}' | head -n1)
@@ -70,8 +80,10 @@ sysctl --system > /dev/null
 log_success "Kernel packet forwarding enabled"
 
 log_step "Updating package repositories and installing base prerequisites"
-rm -f /etc/apt/sources.list.d/amnezia.list
-apt-get update -qq
+apt-get update || {
+    log_warn "apt-get update reported warnings with some mirrors, continuing setup"
+}
+
 apt-get install -y -qq curl wget gnupg nftables iptables qrencode dkms
 apt-get install -y -qq linux-headers-$(uname -r) || true
 log_success "Base dependencies installed"
@@ -131,8 +143,20 @@ if [ -z "${OS_CODENAME}" ] || ! curl -s -f -o /dev/null "https://ppa.launchpadco
 fi
 
 echo "deb [signed-by=/etc/apt/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu ${OS_CODENAME} main" > /etc/apt/sources.list.d/amnezia.list
-apt-get update -qq
-apt-get install -y -qq amneziawg amneziawg-tools
+apt-get update || true
+
+if ! apt-get install -y amneziawg amneziawg-tools; then
+    log_warn "Apt install failed, falling back to direct .deb package installation from Launchpad pool"
+    PPA_BASE="https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu"
+    DKMS_DEB="pool/main/a/amneziawg-linux-kmod/amneziawg-dkms_1.0.0-0~202609061402+4569c4c~ubuntu22.04.1_all.deb"
+    TOOLS_DEB="pool/main/a/amneziawg/amneziawg-tools_1.0.20210914-0~202608130145+ee0f0a9~ubuntu22.04.1_amd64.deb"
+
+    wget -q "${PPA_BASE}/${DKMS_DEB}" -O /tmp/amneziawg-dkms.deb
+    wget -q "${PPA_BASE}/${TOOLS_DEB}" -O /tmp/amneziawg-tools.deb
+
+    dpkg -i /tmp/amneziawg-dkms.deb /tmp/amneziawg-tools.deb || apt-get install -f -y
+    rm -f /tmp/amneziawg-dkms.deb /tmp/amneziawg-tools.deb
+fi
 log_success "AmneziaWG and tools installed"
 
 log_step "Setting up AmneziaWG directory and keys"
