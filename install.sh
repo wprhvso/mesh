@@ -237,6 +237,40 @@ log_step "Starting and enabling awg-quick@awg0 service"
 systemctl enable --now awg-quick@awg0
 log_success "AmneziaWG awg0 service is active"
 
+log_step "Writing nftables configuration (/etc/nftables.conf)"
+cat << EOF > /etc/nftables.conf
+flush ruleset
+
+table inet filter {
+    set ru_domains {
+        type ipv4_addr
+        flags timeout
+        timeout 1h
+    }
+
+    chain prerouting {
+        type filter hook prerouting priority mangle; policy accept;
+        iifname "awg0" tcp dport 853 reject with tcp reset
+        iifname "awg0" ip daddr @ru_domains meta mark set 0x100
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        tcp flags syn tcp option maxseg size set rt mtu
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        meta mark 0x100 oifname "${DEFAULT_IFACE}" masquerade
+        oifname "wg-mesh" masquerade
+    }
+}
+EOF
+
+systemctl enable --now nftables
+systemctl restart nftables
+log_success "nftables rules applied and service enabled"
+
 log_step "Fetching and installing SmartDNS"
 SMARTDNS_DEB=$(curl -sSL https://api.github.com/repos/pymumu/smartdns/releases/latest | grep "browser_download_url.*x86_64.*\.deb" | cut -d : -f 2,3 | tr -d \" | tr -d ' ')
 log_info "Downloading SmartDNS from: ${SMARTDNS_DEB}"
@@ -277,52 +311,18 @@ nameserver /.vk.com/domestic
 nameserver /.dzen.ru/domestic
 nameserver /.gosuslugi.ru/domestic
 
-nftset /.ru/4#inet#filter#ru_domains
-nftset /.xn--p1ai/4#inet#filter#ru_domains
-nftset /.su/4#inet#filter#ru_domains
-nftset /.yandex.net/4#inet#filter#ru_domains
-nftset /.vk.com/4#inet#filter#ru_domains
-nftset /.dzen.ru/4#inet#filter#ru_domains
-nftset /.gosuslugi.ru/4#inet#filter#ru_domains
+nftset /.ru/#4:inet#filter#ru_domains
+nftset /.xn--p1ai/#4:inet#filter#ru_domains
+nftset /.su/#4:inet#filter#ru_domains
+nftset /.yandex.net/#4:inet#filter#ru_domains
+nftset /.vk.com/#4:inet#filter#ru_domains
+nftset /.dzen.ru/#4:inet#filter#ru_domains
+nftset /.gosuslugi.ru/#4:inet#filter#ru_domains
 EOF
 
 systemctl enable --now smartdns
 systemctl restart smartdns
 log_success "SmartDNS service configured and running"
-
-log_step "Writing nftables configuration (/etc/nftables.conf)"
-cat << EOF > /etc/nftables.conf
-flush ruleset
-
-table inet filter {
-    set ru_domains {
-        type ipv4_addr
-        flags timeout
-        timeout 1h
-    }
-
-    chain prerouting {
-        type filter hook prerouting priority mangle; policy accept;
-        iifname "awg0" tcp dport 853 reject with tcp reset
-        iifname "awg0" ip daddr @ru_domains meta mark set 0x100
-    }
-
-    chain forward {
-        type filter hook forward priority filter; policy accept;
-        tcp flags syn tcp option maxseg size set rt mtu
-    }
-
-    chain postrouting {
-        type nat hook postrouting priority srcnat; policy accept;
-        meta mark 0x100 oifname "${DEFAULT_IFACE}" masquerade
-        oifname "wg-mesh" masquerade
-    }
-}
-EOF
-
-systemctl enable --now nftables
-systemctl restart nftables
-log_success "nftables rules applied and service enabled"
 
 log_step "Configuring Policy-Based Routing systemd service"
 cat << EOF > /etc/systemd/system/pbr-mesh.service
