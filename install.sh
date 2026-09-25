@@ -387,7 +387,7 @@ log_step "Deploying Mesh Control Plane Web Panel (FastAPI + Svelte + SQLite)"
 mkdir -p /opt/mesh/server
 python3 -m venv /opt/mesh/venv
 /opt/mesh/venv/bin/pip install --upgrade pip -q
-/opt/mesh/venv/bin/pip install -q fastapi uvicorn sqlalchemy alembic pydantic qrcode
+/opt/mesh/venv/bin/pip install -q fastapi uvicorn sqlalchemy alembic pydantic qrcode pillow
 
 TMP_REPO="/tmp/mesh-repo-dl"
 rm -rf "${TMP_REPO}"
