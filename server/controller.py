@@ -56,6 +56,8 @@ class MeshHandler(BaseHTTPRequestHandler):
 
             ip = f"10.200.0.{node_id + 10}"
             tun_name = f"tun{node_id}"
+            tun_client_ip = f"10.254.{node_id}.2"
+            tun_server_ip = f"10.254.{node_id}.1"
 
             subprocess.run([
                 "wg", "set", WG_IFACE,
@@ -69,14 +71,15 @@ class MeshHandler(BaseHTTPRequestHandler):
                 "ip", "tunnel", "add", tun_name, "mode", "ipip",
                 "remote", ip, "local", "10.200.0.1", "dev", WG_IFACE
             ], check=False)
-            subprocess.run(["ip", "addr", "add", f"10.254.{node_id}.1/30", "dev", tun_name], check=False)
+            subprocess.run(["ip", "addr", "add", f"{tun_server_ip}/30", "dev", tun_name], check=False)
             subprocess.run(["ip", "link", "set", tun_name, "mtu", "1380", "up"], check=False)
 
             with nodes_lock:
                 nodes[node_id] = {
                     "ip": ip,
                     "tun": tun_name,
-                    "tun_peer": f"10.254.{node_id}.2",
+                    "tun_client_ip": tun_client_ip,
+                    "tun_server_ip": tun_server_ip,
                     "pubkey": pubkey,
                     "registered_at": time.time(),
                     "healthy": False
@@ -88,8 +91,8 @@ class MeshHandler(BaseHTTPRequestHandler):
             resp = {
                 "status": "ok",
                 "ip": ip,
-                "tun_peer": f"10.254.{node_id}.1",
-                "tun_ip": f"10.254.{node_id}.2",
+                "tun_server_ip": tun_server_ip,
+                "tun_client_ip": tun_client_ip,
                 "server_pubkey": SERVER_PUBKEY,
                 "server_port": 51821
             }
@@ -120,20 +123,20 @@ def update_routing():
 
         healthy_tuns = []
         for nid, info in current_nodes:
-            peer_ip = info["tun_peer"]
-            res = subprocess.run(["ping", "-c", "1", "-W", "1", peer_ip], stdout=subprocess.DEVNULL)
+            client_ip = info["tun_client_ip"]
+            res = subprocess.run(["ping", "-c", "1", "-W", "1", client_ip], stdout=subprocess.DEVNULL)
             is_healthy = (res.returncode == 0)
             with nodes_lock:
                 if nid in nodes:
                     nodes[nid]["healthy"] = is_healthy
             if is_healthy:
-                healthy_tuns.append((info["tun"], peer_ip))
+                healthy_tuns.append((info["tun"], client_ip))
 
         if healthy_tuns != last_healthy:
             if healthy_tuns:
                 nexthops = []
-                for tun, peer_ip in healthy_tuns:
-                    nexthops.extend(["nexthop", "via", peer_ip, "dev", tun, "weight", "1"])
+                for tun, client_ip in healthy_tuns:
+                    nexthops.extend(["nexthop", "via", client_ip, "dev", tun, "weight", "1"])
                 cmd = ["ip", "route", "replace", "default", "scope", "global", "table", "200"] + nexthops
                 subprocess.run(cmd, check=False)
             else:
