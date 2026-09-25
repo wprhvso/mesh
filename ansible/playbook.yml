@@ -1,0 +1,201 @@
+---
+- name: Deploy AmneziaWG and SmartDNS gateway
+  hosts: server
+  become: true
+  vars:
+    awg_interface: awg0
+    awg_server_ip: 10.10.1.1
+    awg_client_ip: 10.10.1.2
+    awg_listen_port: 51820
+    awg_jc: 4
+    awg_jmin: 40
+    awg_jmax: 70
+    awg_s1: 15
+    awg_s2: 30
+    awg_h1: 123456789
+    awg_h2: 987654321
+    awg_h3: 135792468
+    awg_h4: 246813579
+    mesh_interface: wg-mesh
+    default_interface: "{{ ansible_default_ipv4.interface }}"
+    default_gateway: "{{ ansible_default_ipv4.gateway }}"
+
+  tasks:
+    - name: Enable IPv4 and IPv6 forwarding
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-ipforward.conf
+        content: |
+          net.ipv4.ip_forward = 1
+          net.ipv6.conf.all.forwarding = 1
+        mode: "0644"
+
+    - name: Apply sysctl settings
+      ansible.builtin.command: sysctl --system
+
+    - name: Install prerequisite packages
+      ansible.builtin.apt:
+        name:
+          - software-properties-common
+          - curl
+          - wget
+          - gnupg
+          - nftables
+          - iptables
+        state: present
+        update_cache: true
+
+    - name: Add Amnezia PPA repository
+      ansible.builtin.apt_repository:
+        repo: ppa:amnezia/ppa
+        state: present
+
+    - name: Install AmneziaWG packages
+      ansible.builtin.apt:
+        name:
+          - amneziawg
+          - amneziawg-tools
+        state: present
+        update_cache: true
+
+    - name: Ensure Amnezia directory exists
+      ansible.builtin.file:
+        path: /etc/amnezia/amneziawg
+        state: directory
+        mode: "0700"
+
+    - name: Check if server private key exists
+      ansible.builtin.stat:
+        path: /etc/amnezia/amneziawg/server_private.key
+      register: server_key_stat
+
+    - name: Generate server private key
+      ansible.builtin.command: awg genkey
+      register: gen_server_private
+      when: not server_key_stat.stat.exists
+
+    - name: Save server private key
+      ansible.builtin.copy:
+        content: "{{ gen_server_private.stdout }}"
+        dest: /etc/amnezia/amneziawg/server_private.key
+        mode: "0600"
+      when: not server_key_stat.stat.exists
+
+    - name: Read server private key
+      ansible.builtin.slurp:
+        src: /etc/amnezia/amneziawg/server_private.key
+      register: server_priv_b64
+
+    - name: Set server private key fact
+      ansible.builtin.set_fact:
+        awg_server_priv: "{{ server_priv_b64.content | b64decode | trim }}"
+
+    - name: Generate server public key
+      ansible.builtin.command:
+        cmd: awg pubkey
+        stdin: "{{ awg_server_priv }}"
+      register: gen_server_pub
+
+    - name: Set server public key fact
+      ansible.builtin.set_fact:
+        awg_server_pub: "{{ gen_server_pub.stdout | trim }}"
+
+    - name: Check if client private key exists
+      ansible.builtin.stat:
+        path: /etc/amnezia/amneziawg/client_private.key
+      register: client_key_stat
+
+    - name: Generate client private key
+      ansible.builtin.command: awg genkey
+      register: gen_client_private
+      when: not client_key_stat.stat.exists
+
+    - name: Save client private key
+      ansible.builtin.copy:
+        content: "{{ gen_client_private.stdout }}"
+        dest: /etc/amnezia/amneziawg/client_private.key
+        mode: "0600"
+      when: not client_key_stat.stat.exists
+
+    - name: Read client private key
+      ansible.builtin.slurp:
+        src: /etc/amnezia/amneziawg/client_private.key
+      register: client_priv_b64
+
+    - name: Set client private key fact
+      ansible.builtin.set_fact:
+        awg_client_priv: "{{ client_priv_b64.content | b64decode | trim }}"
+
+    - name: Generate client public key
+      ansible.builtin.command:
+        cmd: awg pubkey
+        stdin: "{{ awg_client_priv }}"
+      register: gen_client_pub
+
+    - name: Set client public key fact
+      ansible.builtin.set_fact:
+        awg_client_pub: "{{ gen_client_pub.stdout | trim }}"
+
+    - name: Template awg0 server configuration
+      ansible.builtin.template:
+        src: awg0.conf.j2
+        dest: /etc/amnezia/amneziawg/awg0.conf
+        mode: "0600"
+
+    - name: Template client configuration
+      ansible.builtin.template:
+        src: client.conf.j2
+        dest: /etc/amnezia/amneziawg/client.conf
+        mode: "0600"
+
+    - name: Enable and start AmneziaWG service
+      ansible.builtin.systemd:
+        name: awg-quick@awg0
+        state: restarted
+        enabled: true
+
+    - name: Download SmartDNS deb package
+      ansible.builtin.get_url:
+        url: https://github.com/pymumu/smartdns/releases/download/Release48.4/smartdns.1.2026.08.05-0921.x86_64-debian-all.deb
+        dest: /tmp/smartdns.deb
+        mode: "0644"
+
+    - name: Install SmartDNS package
+      ansible.builtin.apt:
+        deb: /tmp/smartdns.deb
+
+    - name: Template SmartDNS configuration
+      ansible.builtin.template:
+        src: smartdns.conf.j2
+        dest: /etc/smartdns/smartdns.conf
+        mode: "0644"
+
+    - name: Enable and restart SmartDNS service
+      ansible.builtin.systemd:
+        name: smartdns
+        state: restarted
+        enabled: true
+
+    - name: Template nftables configuration
+      ansible.builtin.template:
+        src: nftables.conf.j2
+        dest: /etc/nftables.conf
+        mode: "0644"
+
+    - name: Enable and restart nftables service
+      ansible.builtin.systemd:
+        name: nftables
+        state: restarted
+        enabled: true
+
+    - name: Template policy routing systemd service
+      ansible.builtin.template:
+        src: pbr-mesh.service.j2
+        dest: /etc/systemd/system/pbr-mesh.service
+        mode: "0644"
+
+    - name: Enable and restart policy routing service
+      ansible.builtin.systemd:
+        name: pbr-mesh
+        daemon_reload: true
+        state: restarted
+        enabled: true

@@ -13,3 +13,11 @@ A distributed egress mesh and compute architecture using a persistent Master Gat
 - `.github/workflows/mesh.yml`: Matrix runner definitions and lifecycle orchestrator.
 - `agent/`: Ephemeral node onboarding, tunneling, and NAT masquerade.
 - `server/`: Controller daemon for node health monitoring and auto-dispatching.
+- `ansible/`: Minimalist Ansible automation configuring AmneziaWG, SmartDNS, and nftables routing.
+
+## Deployment
+
+```bash
+cd ansible
+ansible-playbook playbook.yml
+```

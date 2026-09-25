@@ -1,0 +1,19 @@
+[Interface]
+Address = {{ awg_client_ip }}/32
+PrivateKey = {{ awg_client_priv }}
+DNS = {{ awg_server_ip }}
+Jc = {{ awg_jc }}
+Jmin = {{ awg_jmin }}
+Jmax = {{ awg_jmax }}
+S1 = {{ awg_s1 }}
+S2 = {{ awg_s2 }}
+H1 = {{ awg_h1 }}
+H2 = {{ awg_h2 }}
+H3 = {{ awg_h3 }}
+H4 = {{ awg_h4 }}
+
+[Peer]
+PublicKey = {{ awg_server_pub }}
+Endpoint = {{ ansible_host }}:{{ awg_listen_port }}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
