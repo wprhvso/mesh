@@ -173,15 +173,14 @@ def reconcile_routing_and_weights(db):
 def reconcile_fleet(db):
     accounts = db.query(GitHubAccount).filter(GitHubAccount.is_active == True).all()
     now = time.time()
-    for acc in accounts:
-        active_runners = db.query(Runner).filter(
-            Runner.account_id == acc.id,
-            Runner.healthy == True,
-            Runner.status == "active"
-        ).count()
+    active_runners = db.query(Runner).filter(
+        Runner.healthy == True,
+        Runner.status == "active"
+    ).count()
 
+    for acc in accounts:
         last_disp = acc.last_dispatched_at.timestamp() if acc.last_dispatched_at else 0
-        if active_runners < 15 and (now - last_disp > 300):
+        if active_runners < 10 and (now - last_disp > 1800):
             try:
                 url = f"https://api.github.com/repos/{acc.repo_name}/actions/workflows/mesh.yml/dispatches"
                 req = urllib.request.Request(url, data=json.dumps({"ref": "main"}).encode(), headers={

@@ -5,10 +5,6 @@ on:
   schedule:
     - cron: '0 */5 * * *'
 
-concurrency:
-  group: mesh-cluster
-  cancel-in-progress: true
-
 jobs:
   node:
     runs-on: ubuntu-latest
