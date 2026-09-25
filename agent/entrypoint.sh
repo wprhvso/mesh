@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 set -e
 
-sudo apt-get update -qq && sudo apt-get install -y -qq wireguard-tools iptables curl jq
+sudo apt-get update -qq && sudo apt-get install -y -qq wireguard-tools iptables curl jq openssh-server
 sudo modprobe ipip
+
+if [ -n "${SSH_PUBKEY}" ]; then
+    sudo mkdir -p /home/runner/.ssh /root/.ssh
+    echo "${SSH_PUBKEY}" | sudo tee -a /home/runner/.ssh/authorized_keys /root/.ssh/authorized_keys > /dev/null
+    sudo chmod 700 /home/runner/.ssh /root/.ssh
+    sudo chmod 600 /home/runner/.ssh/authorized_keys /root/.ssh/authorized_keys
+    sudo chown -R runner:docker /home/runner/.ssh 2>/dev/null || true
+    sudo systemctl restart ssh || sudo service ssh restart || true
+fi
 
 PRIVATE_KEY=$(wg genkey)
 PUBLIC_KEY=$(echo "${PRIVATE_KEY}" | wg pubkey)

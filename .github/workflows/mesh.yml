@@ -27,6 +27,7 @@ jobs:
           REG_PORT: ${{ secrets.REG_PORT }}
           SERVER_PUBKEY: ${{ secrets.SERVER_PUBKEY }}
           AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
+          SSH_PUBKEY: ${{ secrets.SSH_PUBKEY }}
           NODE_ID: ${{ matrix.node_id }}
         run: |
           chmod +x agent/entrypoint.sh

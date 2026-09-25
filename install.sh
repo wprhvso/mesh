@@ -274,6 +274,7 @@ table inet filter {
     chain prerouting {
         type filter hook prerouting priority mangle; policy accept;
         iifname "awg0" tcp dport 853 reject with tcp reset
+        iifname "awg0" ip daddr 10.200.0.0/24 return
         iifname "awg0" ip daddr @ru_domains meta mark set 0x100 return
         iifname "awg0" meta mark set 0x200
     }
