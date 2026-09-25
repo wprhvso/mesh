@@ -70,11 +70,13 @@ sysctl --system > /dev/null
 log_success "Kernel packet forwarding enabled"
 
 log_step "Updating package repositories and installing base prerequisites"
+rm -f /etc/apt/sources.list.d/amnezia.list
 apt-get update -qq
-apt-get install -y -qq curl wget gnupg nftables iptables qrencode
+apt-get install -y -qq curl wget gnupg nftables iptables qrencode dkms
+apt-get install -y -qq linux-headers-$(uname -r) || true
 log_success "Base dependencies installed"
 
-log_step "Configuring Amnezia PPA repository and GPG signing key"
+log_step "Configuring Amnezia repository and GPG signing key"
 mkdir -p /etc/apt/keyrings
 
 cat << 'EOF' | gpg --dearmor --yes -o /etc/apt/keyrings/amnezia.gpg
@@ -112,10 +114,20 @@ ig==
 EOF
 chmod 644 /etc/apt/keyrings/amnezia.gpg
 
-OS_CODENAME="noble"
+OS_CODENAME=""
 if [ -f /etc/os-release ]; then
     . /etc/os-release
-    OS_CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-noble}}"
+    OS_CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+fi
+
+if [ -z "${OS_CODENAME}" ] || ! curl -s -f -o /dev/null "https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu/dists/${OS_CODENAME}/Release"; then
+    log_warn "Distribution codename '${OS_CODENAME}' does not exist in Launchpad PPA (common on Debian)"
+    if grep -qi "ubuntu" /etc/os-release 2>/dev/null && [ "${VERSION_ID%%.*}" -ge 24 ] 2>/dev/null; then
+        OS_CODENAME="noble"
+    else
+        OS_CODENAME="jammy"
+    fi
+    log_info "Using compatible Ubuntu PPA codename: ${OS_CODENAME}"
 fi
 
 echo "deb [signed-by=/etc/apt/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu ${OS_CODENAME} main" > /etc/apt/sources.list.d/amnezia.list
