@@ -197,7 +197,7 @@
     {#if me.is_admin}
       <nav class="tab-bar">
         <button class:active={currentTab === 'clients'} on:click={() => currentTab = 'clients'}>Clients ({clients.length})</button>
-        <button class:active={currentTab === 'runners'} on:click={() => currentTab = 'runners'}>Runners ({runners.filter(r => r.healthy).length}/{runners.length})</button>
+        <button class:active={currentTab === 'runners'} on:click={() => currentTab = 'runners'}>Runners Matrix ({runners.filter(r => r.healthy).length}/{runners.length})</button>
         <button class:active={currentTab === 'donors'} on:click={() => currentTab = 'donors'}>GitHub Donors ({donors.length})</button>
         <button class:active={currentTab === 'ssh'} on:click={() => currentTab = 'ssh'}>SSH Keys ({sshKeys.length})</button>
         <button class:active={currentTab === 'dns'} on:click={() => currentTab = 'dns'}>DNS Zone (.mesh)</button>
@@ -223,9 +223,9 @@
             </div>
 
             <div class="card">
-              <h3>Split Routing Telemetry</h3>
+              <h3>Split Routing & Dynamic ECMP</h3>
               <p><strong>RU Traffic:</strong> Direct through physical link (91.230.210.17)</p>
-              <p><strong>Overseas Traffic:</strong> Multipath ECMP through {runners.filter(r => r.healthy).length} Azure Nodes</p>
+              <p><strong>Overseas Traffic:</strong> Weighted ECMP through {runners.filter(r => r.healthy).length} Azure Nodes</p>
               <p><strong>SmartDNS:</strong> 10.10.1.1:53 active</p>
               <p><strong>Cluster Egress:</strong> Microsoft Azure Datacenters</p>
             </div>
@@ -290,22 +290,37 @@
       {:else if currentTab === 'runners'}
         <div class="panel-section">
           <div class="section-header">
-            <h2>Azure Runner Fleet ({runners.filter(r => r.healthy).length} Online / {runners.length} Total)</h2>
+            <h2>Dynamic Weighted Path Matrix ({runners.filter(r => r.healthy).length} Online / {runners.length} Total)</h2>
             <button class="btn btn-primary" on:click={() => { donors.forEach(d => dispatchDonor(d.id)); }}>Force Re-dispatch All</button>
           </div>
+          <p class="section-desc">Linux kernel ECMP weights are calculated dynamically: Cost = (RTT_mesh + RTT_egress) * LossPenalty. Draining nodes gracefully shed new traffic.</p>
 
           <div class="runner-grid">
             {#each runners as r}
-              <div class="runner-card" class:runner-healthy={r.healthy}>
+              <div class="runner-card" class:runner-healthy={r.healthy} class:runner-draining={r.status === 'draining'}>
                 <div class="runner-header">
                   <span class="runner-title">runner{r.node_id}.mesh</span>
-                  <span class="indicator-dot" class:online={r.healthy}></span>
+                  {#if r.status === 'active'}
+                    <span class="badge badge-active">ACTIVE</span>
+                  {:else if r.status === 'draining'}
+                    <span class="badge badge-draining">DRAINING</span>
+                  {:else}
+                    <span class="badge badge-disabled">OFFLINE</span>
+                  {/if}
                 </div>
                 <div class="runner-details">
-                  <p><strong>Mesh IP:</strong> <code>{r.mesh_ip}</code></p>
-                  <p><strong>Overlay IP:</strong> <code>{r.tun_client_ip}</code></p>
+                  <div class="weight-bar-container">
+                    <div class="weight-label">
+                      <span>ECMP Weight</span>
+                      <strong>{r.weight || 0} / 100</strong>
+                    </div>
+                    <div class="weight-bar">
+                      <div class="weight-fill" style="width: {r.weight || 1}%"></div>
+                    </div>
+                  </div>
+                  <p><strong>Latency:</strong> {r.rtt_total ? r.rtt_total + ' ms' : 'N/A'} <small class="text-muted">(Mesh: {r.rtt_mesh}ms, Edge: {r.rtt_egress}ms)</small></p>
                   <p><strong>Azure Egress:</strong> <code>{r.egress_ip || 'Negotiating...'}</code></p>
-                  <p><strong>Latency:</strong> {r.ping_ms ? r.ping_ms + ' ms' : 'N/A'}</p>
+                  <p><strong>Mesh IP:</strong> <code>{r.mesh_ip}</code></p>
                   <p class="ssh-hint"><code>ssh runner@{r.mesh_ip}</code></p>
                 </div>
               </div>
@@ -542,12 +557,14 @@
   .badge-admin { background: #8b5cf6; color: white; }
   .badge-user { background: #3b82f6; color: white; }
   .badge-active { background: #166534; color: #86efac; }
+  .badge-draining { background: #854d0e; color: #fde047; }
   .badge-disabled { background: #7f1d1d; color: #fca5a5; }
   .tab-bar {
     display: flex;
     gap: 8px;
     border-bottom: 1px solid #1e293b;
     margin-bottom: 24px;
+    overflow-x: auto;
   }
   .tab-bar button {
     background: transparent;
@@ -557,6 +574,7 @@
     font-size: 0.95rem;
     cursor: pointer;
     border-bottom: 2px solid transparent;
+    white-space: nowrap;
   }
   .tab-bar button.active {
     color: #38bdf8;
@@ -567,6 +585,12 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    margin-bottom: 16px;
+  }
+  .section-desc {
+    color: #94a3b8;
+    font-size: 0.85rem;
+    margin-top: -8px;
     margin-bottom: 16px;
   }
   .card-grid {
@@ -610,7 +634,7 @@
   .data-table th { background: #0f172a; color: #94a3b8; font-size: 0.85rem; }
   .runner-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
     gap: 16px;
   }
   .runner-card {
@@ -622,6 +646,9 @@
   .runner-card.runner-healthy {
     border-color: #22c55e44;
   }
+  .runner-card.runner-draining {
+    border-color: #eab30866;
+  }
   .runner-header {
     display: flex;
     justify-content: space-between;
@@ -631,6 +658,29 @@
     color: #38bdf8;
   }
   .runner-details p { margin: 4px 0; font-size: 0.85rem; }
+  .weight-bar-container {
+    margin: 10px 0;
+  }
+  .weight-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.8rem;
+    margin-bottom: 4px;
+    color: #cbd5e1;
+  }
+  .weight-bar {
+    width: 100%;
+    height: 6px;
+    background: #0f172a;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .weight-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #38bdf8, #22c55e);
+    border-radius: 3px;
+  }
+  .text-muted { color: #64748b; font-size: 0.75rem; }
   .ssh-hint { color: #94a3b8; margin-top: 8px; font-size: 0.75rem; }
   .modal-backdrop {
     position: fixed;

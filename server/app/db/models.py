@@ -30,15 +30,21 @@ class Runner(Base):
     __tablename__ = "runners"
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey("github_accounts.id"), nullable=True)
-    node_id = Column(Integer, nullable=False)
+    node_id = Column(Integer, nullable=False, unique=True)
     mesh_ip = Column(String, nullable=False)
     tun_name = Column(String, nullable=False)
     tun_client_ip = Column(String, nullable=False)
     tun_server_ip = Column(String, nullable=False)
     pubkey = Column(String, nullable=False)
     egress_ip = Column(String, nullable=True)
+    status = Column(String, default="active")
     healthy = Column(Boolean, default=False)
-    ping_ms = Column(Float, default=0.0)
+    rtt_mesh = Column(Float, default=0.0)
+    rtt_egress = Column(Float, default=0.0)
+    rtt_total = Column(Float, default=0.0)
+    weight = Column(Integer, default=10)
+    loss_rate = Column(Float, default=0.0)
+    registered_at = Column(DateTime, default=datetime.datetime.utcnow)
     last_seen = Column(DateTime, default=datetime.datetime.utcnow)
 
 class SSHKey(Base):

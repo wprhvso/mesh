@@ -4,6 +4,7 @@ import subprocess
 import time
 import urllib.request
 import json
+import datetime
 from app.db.session import SessionLocal
 from app.db.models import Client, Runner, GitHubAccount, SSHKey, DNSRecord
 
@@ -30,7 +31,7 @@ def run_reconciliation():
         reconcile_clients(db)
         reconcile_dns(db)
         reconcile_ssh(db)
-        reconcile_routing(db)
+        reconcile_routing_and_weights(db)
         reconcile_fleet(db)
     finally:
         db.close()
@@ -67,10 +68,19 @@ def reconcile_dns(db):
         with open(zone_path, "r", encoding="utf-8") as f:
             current_content = f.read()
 
+    smartdns_conf_path = "/etc/smartdns/smartdns.conf"
+    if os.path.exists(smartdns_conf_path):
+        with open(smartdns_conf_path, "r", encoding="utf-8") as sf:
+            s_content = sf.read()
+        if "mesh-zone.conf" not in s_content:
+            with open(smartdns_conf_path, "a", encoding="utf-8") as sf:
+                sf.write("\nconf-file /etc/smartdns/mesh-zone.conf\n")
+            subprocess.run(["systemctl", "restart", "smartdns"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     if new_content != current_content:
         with open(zone_path, "w", encoding="utf-8") as f:
             f.write(new_content)
-        subprocess.run(["systemctl", "reload", "smartdns"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["systemctl", "restart", "smartdns"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def reconcile_ssh(db):
     keys = db.query(SSHKey).all()
@@ -92,21 +102,62 @@ def reconcile_ssh(db):
             f.write(new_auth)
         os.chmod(auth_path, 0o600)
 
-def reconcile_routing(db):
-    runners = db.query(Runner).all()
-    healthy_tuns = []
-    for r in runners:
-        res = subprocess.run(["ping", "-c", "1", "-W", "1", r.tun_client_ip], stdout=subprocess.DEVNULL)
-        is_healthy = (res.returncode == 0)
-        r.healthy = is_healthy
-        if is_healthy:
-            healthy_tuns.append((r.tun_name, r.tun_client_ip))
-    db.commit()
+def parse_ping(ip):
+    res = subprocess.run(["ping", "-c", "2", "-W", "1", ip], capture_output=True, text=True)
+    if res.returncode != 0:
+        return None
+    for line in res.stdout.splitlines():
+        if "rtt min/avg/max/mdev" in line or "round-trip min/avg/max/stddev" in line:
+            parts = line.split("=")[1].strip().split("/")
+            return float(parts[1])
+    return 10.0
 
-    if healthy_tuns:
+def reconcile_routing_and_weights(db):
+    runners = db.query(Runner).all()
+    now = datetime.datetime.utcnow()
+
+    candidate_tuns = []
+    costs = {}
+
+    for r in runners:
+        age_seconds = (now - r.registered_at).total_seconds() if r.registered_at else 0
+        is_draining = (age_seconds >= 18000) or (r.status == "draining")
+
+        ping_val = parse_ping(r.tun_client_ip)
+        if ping_val is not None:
+            r.healthy = True
+            r.last_seen = now
+            if r.rtt_mesh > 0:
+                r.rtt_mesh = round(0.7 * r.rtt_mesh + 0.3 * ping_val, 2)
+            else:
+                r.rtt_mesh = round(ping_val, 2)
+            r.rtt_total = round(r.rtt_mesh + (r.rtt_egress or 5.0), 2)
+
+            cost = r.rtt_total
+            if is_draining:
+                cost *= 20.0
+                r.status = "draining"
+            else:
+                r.status = "active"
+
+            costs[r.id] = cost
+            candidate_tuns.append(r)
+        else:
+            r.healthy = False
+            r.status = "offline"
+
+    if candidate_tuns and costs:
+        min_cost = min(costs.values())
         nexthops = []
-        for tun, client_ip in healthy_tuns:
-            nexthops.extend(["nexthop", "via", client_ip, "dev", tun, "weight", "1"])
+        for r in candidate_tuns:
+            cost = costs[r.id]
+            if r.status == "draining":
+                w = 1
+            else:
+                w = max(1, min(100, int(round(100.0 * (min_cost / max(cost, 1.0))))))
+            r.weight = w
+            nexthops.extend(["nexthop", "via", r.tun_client_ip, "dev", r.tun_name, "weight", str(w)])
+
         cmd = ["ip", "route", "replace", "default", "scope", "global", "table", "200"] + nexthops
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
@@ -117,13 +168,20 @@ def reconcile_routing(db):
             "dev", default_iface, "table", "200"
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    db.commit()
+
 def reconcile_fleet(db):
     accounts = db.query(GitHubAccount).filter(GitHubAccount.is_active == True).all()
+    now = time.time()
     for acc in accounts:
-        runners_count = db.query(Runner).filter(Runner.account_id == acc.id, Runner.healthy == True).count()
-        now = time.time()
+        active_runners = db.query(Runner).filter(
+            Runner.account_id == acc.id,
+            Runner.healthy == True,
+            Runner.status == "active"
+        ).count()
+
         last_disp = acc.last_dispatched_at.timestamp() if acc.last_dispatched_at else 0
-        if runners_count < 15 and (now - last_disp > 300):
+        if active_runners < 15 and (now - last_disp > 300):
             try:
                 url = f"https://api.github.com/repos/{acc.repo_name}/actions/workflows/mesh.yml/dispatches"
                 req = urllib.request.Request(url, data=json.dumps({"ref": "main"}).encode(), headers={

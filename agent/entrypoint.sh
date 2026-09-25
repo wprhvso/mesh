@@ -16,7 +16,13 @@ fi
 PRIVATE_KEY=$(wg genkey)
 PUBLIC_KEY=$(echo "${PRIVATE_KEY}" | wg pubkey)
 
-REGISTER_PAYLOAD=$(printf '{"node_id": %d, "pubkey": "%s"}' "${NODE_ID}" "${PUBLIC_KEY}")
+EGRESS_IP=$(curl -s4 https://api.ipify.org || hostname -I | awk '{print $1}')
+EGRESS_RTT=$(ping -c 2 -W 1 1.1.1.1 2>/dev/null | grep 'rtt min/avg/max' | awk -F'/' '{print $5}' || echo "5.0")
+if [ -z "${EGRESS_RTT}" ]; then
+    EGRESS_RTT="5.0"
+fi
+
+REGISTER_PAYLOAD=$(printf '{"node_id": %d, "pubkey": "%s", "egress_ip": "%s", "egress_rtt": %s}' "${NODE_ID}" "${PUBLIC_KEY}" "${EGRESS_IP}" "${EGRESS_RTT}")
 
 RESP=$(curl -s -S -f --connect-timeout 10 --max-time 15     -X POST "http://${SERVER_HOST}:${REG_PORT}/register"     -H "Authorization: Bearer ${AUTH_TOKEN}"     -H "Content-Type: application/json"     -d "${REGISTER_PAYLOAD}")
 
@@ -59,11 +65,31 @@ sudo iptables -A FORWARD -i "${DEFAULT_IFACE}" -o tun0 -m state --state RELATED,
 
 echo "Node ${NODE_ID} active on ${ASSIGNED_IP} (tunnel ${TUN_CLIENT_IP}), ready for traffic"
 
-SLEEP_DURATION=$((18000 + (NODE_ID * 60)))
-END_TIME=$((SECONDS + SLEEP_DURATION))
+START_TIME="${SECONDS}"
+TOTAL_LIFETIME=$((18000 + (NODE_ID * 60)))
+DRAIN_START=$((TOTAL_LIFETIME - 1800))
 
-while [ "${SECONDS}" -lt "${END_TIME}" ]; do
+while true; do
+    ELAPSED=$((SECONDS - START_TIME))
+    if [ "${ELAPSED}" -ge "${TOTAL_LIFETIME}" ]; then
+        break
+    fi
+
+    STATUS="active"
+    if [ "${ELAPSED}" -ge "${DRAIN_START}" ]; then
+        STATUS="draining"
+    fi
+
     ping -c 1 -W 2 "${TUN_SERVER_IP}" > /dev/null 2>&1 || true
+
+    CURR_RTT=$(ping -c 1 -W 1 1.1.1.1 2>/dev/null | grep 'time=' | awk -F'time=' '{print $2}' | awk '{print $1}' || echo "5.0")
+    if [ -z "${CURR_RTT}" ]; then
+        CURR_RTT="5.0"
+    fi
+
+    HB_PAYLOAD=$(printf '{"node_id": %d, "egress_rtt": %s, "uptime": %d, "status": "%s", "egress_ip": "%s"}' "${NODE_ID}" "${CURR_RTT}" "${ELAPSED}" "${STATUS}" "${EGRESS_IP}")
+    curl -s --connect-timeout 5 --max-time 8         -X POST "http://${SERVER_HOST}:${REG_PORT}/heartbeat"         -H "Authorization: Bearer ${AUTH_TOKEN}"         -H "Content-Type: application/json"         -d "${HB_PAYLOAD}" > /dev/null 2>&1 || true
+
     sleep 10
 done
 
