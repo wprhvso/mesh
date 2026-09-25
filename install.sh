@@ -31,7 +31,7 @@ log_error() {
     printf "${C_RED}[ERROR]${C_RESET} [%s] %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$1"
 }
 
-log_info "Starting Mesh Gateway installation script"
+log_info "Starting Mesh Gateway and Control Plane installation script"
 log_info "All logs are being written to ${LOG_FILE}"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -84,7 +84,7 @@ apt-get update || {
     log_warn "apt-get update reported warnings with some mirrors, continuing setup"
 }
 
-apt-get install -y -qq curl wget gnupg nftables iptables qrencode dkms wireguard-tools python3
+apt-get install -y -qq curl wget gnupg nftables iptables qrencode dkms wireguard-tools python3 python3-pip python3-venv
 apt-get install -y -qq linux-headers-$(uname -r) || true
 modprobe ipip || true
 log_success "Base dependencies installed"
@@ -289,6 +289,7 @@ table inet filter {
         meta mark 0x100 oifname "${DEFAULT_IFACE}" masquerade
         meta mark 0x200 oifname "tun*" masquerade
         meta mark 0x200 oifname "${DEFAULT_IFACE}" masquerade
+        oifname "wg-mesh" masquerade
         oifname "${DEFAULT_IFACE}" masquerade
     }
 }
@@ -345,6 +346,16 @@ nftset /.yandex.net/#4:inet#filter#ru_domains
 nftset /.vk.com/#4:inet#filter#ru_domains
 nftset /.dzen.ru/#4:inet#filter#ru_domains
 nftset /.gosuslugi.ru/#4:inet#filter#ru_domains
+
+conf-file /etc/smartdns/mesh-zone.conf
+EOF
+
+cat << 'EOF' > /etc/smartdns/mesh-zone.conf
+address /server.mesh/10.10.1.1
+address /server1.mesh/10.10.1.1
+address /pc.mesh/10.10.1.2
+address /goose.mesh/10.10.1.3
+address /iru.mesh/10.10.1.4
 EOF
 
 systemctl enable --now smartdns
@@ -372,24 +383,70 @@ systemctl enable --now pbr-mesh
 systemctl restart pbr-mesh
 log_success "Policy-Based Routing service configured and active"
 
-log_step "Deploying Mesh Cluster Controller daemon"
-mkdir -p /opt/mesh
-curl -fsSL https://raw.githubusercontent.com/wprhvso/mesh/main/server/controller.py -o /opt/mesh/controller.py
-chmod 755 /opt/mesh/controller.py
+log_step "Deploying Mesh Control Plane Web Panel (FastAPI + Svelte + SQLite)"
+mkdir -p /opt/mesh/server
+python3 -m venv /opt/mesh/venv
+/opt/mesh/venv/bin/pip install --upgrade pip -q
+/opt/mesh/venv/bin/pip install -q fastapi uvicorn sqlalchemy alembic pydantic qrcode
 
-cat << EOF > /etc/systemd/system/mesh-controller.service
+TMP_REPO="/tmp/mesh-repo-dl"
+rm -rf "${TMP_REPO}"
+git clone -q https://github.com/wprhvso/mesh.git "${TMP_REPO}"
+cp -r "${TMP_REPO}/server/"* /opt/mesh/server/
+rm -rf "${TMP_REPO}"
+
+cd /opt/mesh/server
+export PYTHONPATH=/opt/mesh/server
+/opt/mesh/venv/bin/alembic upgrade head || true
+
+/opt/mesh/venv/bin/python3 - << 'PYSEED'
+import os
+import subprocess
+from app.db.session import SessionLocal, init_db
+from app.db.models import Client, GitHubAccount, SSHKey
+
+init_db()
+db = SessionLocal()
+
+if not db.query(Client).filter(Client.name == 'pc').first():
+    priv = 'uBi5puD1IymXpUHEeZA5TohLik/ZuBMpzfsLw7LFXFM='
+    pub = 'WhdacUXY3ABiqq7tY3htgMM+O9AlNnoOdv8UNKIp9X0='
+    db.add(Client(name='pc', domain='pc.mesh', ip='10.10.1.2', private_key=priv, public_key=pub, is_admin=True, is_active=True))
+
+if not db.query(Client).filter(Client.name == 'goose').first():
+    priv = subprocess.run(['awg', 'genkey'], capture_output=True, text=True).stdout.strip()
+    pub = subprocess.run(['awg', 'pubkey'], input=priv, capture_output=True, text=True).stdout.strip()
+    db.add(Client(name='goose', domain='goose.mesh', ip='10.10.1.3', private_key=priv, public_key=pub, is_admin=False, is_active=True))
+
+if not db.query(Client).filter(Client.name == 'iru').first():
+    priv = subprocess.run(['awg', 'genkey'], capture_output=True, text=True).stdout.strip()
+    pub = subprocess.run(['awg', 'pubkey'], input=priv, capture_output=True, text=True).stdout.strip()
+    db.add(Client(name='iru', domain='iru.mesh', ip='10.10.1.4', private_key=priv, public_key=pub, is_admin=False, is_active=True))
+
+if not db.query(SSHKey).filter(SSHKey.title == 'vladimir-live').first():
+    db.add(SSHKey(title='vladimir-live', public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHJSjBdkj1DPYTBqu+VTcNktxaRdJdDilgUlCJe5rIGE user@void-live'))
+
+db.commit()
+db.close()
+PYSEED
+
+cat << EOF > /etc/systemd/system/mesh-panel.service
 [Unit]
-Description=Mesh Cluster Controller and Dynamic Routing Daemon
-After=network.target wg-quick@wg-mesh.service
+Description=Mesh Control Plane Web Panel and Runner Handshake
+After=network.target wg-quick@wg-mesh.service awg-quick@awg0.service
 
 [Service]
 Type=simple
+WorkingDirectory=/opt/mesh/server
+Environment=PYTHONPATH=/opt/mesh/server
+Environment=PANEL_HOST=10.10.1.1
+Environment=PANEL_PORT=80
+Environment=REG_HOST=0.0.0.0
+Environment=REG_PORT=51822
 Environment=AUTH_TOKEN=sec_7d4874b68cc6ff2ff55d81ce6a69f29f6912eb7d
-Environment=GITHUB_REPO=wprhvso/mesh
-Environment=PORT=51822
 Environment=DEFAULT_GW=${DEFAULT_GW}
 Environment=DEFAULT_IFACE=${DEFAULT_IFACE}
-ExecStart=/usr/bin/python3 /opt/mesh/controller.py
+ExecStart=/opt/mesh/venv/bin/python3 /opt/mesh/server/service.py
 Restart=always
 RestartSec=5
 
@@ -398,9 +455,9 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now mesh-controller
-systemctl restart mesh-controller
-log_success "Mesh Cluster Controller active and listening on port 51822"
+systemctl enable --now mesh-panel
+systemctl restart mesh-panel
+log_success "Mesh Control Plane active on http://10.10.1.1:80 (http://server.mesh and http://server1.mesh)"
 
 log_success "Installation completed successfully"
 printf "\n"
@@ -408,6 +465,7 @@ printf "${C_GREEN}==============================================================
 printf "${C_GREEN}                      SETUP COMPLETE                            ${C_RESET}\n"
 printf "${C_GREEN}================================================================${C_RESET}\n"
 printf "Client configuration saved to: %s\n" "/etc/amnezia/amneziawg/client.conf"
+printf "Web Panel URL: %s\n" "http://server.mesh (or http://server1.mesh / http://10.10.1.1)"
 printf "Full installation log saved to: %s\n" "${LOG_FILE}"
 printf "\n"
 if command -v qrencode >/dev/null 2>&1; then
